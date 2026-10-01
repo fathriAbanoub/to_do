@@ -1,0 +1,39 @@
+name: to_do
+description: "A minimal, polished, local-first Flutter Todo app."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  hive_ce_flutter: ^2.3.4
+  hive_ce: ^2.20.0
+  uuid: ^4.5.1
+  supabase_flutter: ^2.17.2
+  flutter_secure_storage: ^9.2.2
+  cryptography: ^2.7.0
+  audioplayers: ^6.1.0
+  confetti: ^0.8.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  hive_ce_generator: ^1.11.0
+  build_runner: ^2.4.14
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/sounds/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  remove_alpha_ios: true
