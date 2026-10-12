@@ -10,7 +10,6 @@ import '../constants.dart';
 import '../models/category.dart';
 import '../models/task.dart';
 import '../services/storage_service.dart';
-import '../widgets/add_task_dialog.dart';
 import '../widgets/task_tile.dart';
 import 'category_screen.dart';
 
@@ -75,6 +74,12 @@ class _TaskScreenState extends State<TaskScreen> {
   /// Accumulated horizontal drag distance from the left-edge strip. Reset on
   /// gesture start and after every end/cancel.
   double _edgeDragDx = 0;
+
+  // Quick-add bar visibility. While true, PopScope intercepts the system
+  // back gesture and a full-screen scrim intercepts outside taps. The bar
+  // and the FAB row share one bottom slot via AnimatedSwitcher, so this
+  // flag also drives which of the two is on screen.
+  bool _showQuickAdd = false;
 
   // One pool per sound. The pool holds kSoundPoolSize independent
   // AudioPlayers and rotates through them, so two consecutive checks land
@@ -213,6 +218,10 @@ class _TaskScreenState extends State<TaskScreen> {
   /// task list to it and persists the choice for the next launch. Shared by
   /// the Categories FAB and the left-edge drag handler.
   Future<void> _openCategories() async {
+    // Don't leave the screen with the keyboard up: close the bar first so
+    // the pop doesn't race its focus/controller teardown.
+    _closeQuickAdd();
+
     final selectedCategoryId = await Navigator.of(
       context,
     ).push<String>(MaterialPageRoute(builder: (_) => const CategoryScreen()));
@@ -267,31 +276,28 @@ class _TaskScreenState extends State<TaskScreen> {
     );
   }
 
-  Future<void> _addTask() async {
-    while (true) {
-      if (!mounted) break;
-      final title = await showDialog<String>(
-        context: context,
-        builder: (dialogContext) => Theme(
-          data: _categoryTheme(dialogContext),
-          child: const AddTaskDialog(),
-        ),
-      );
-      if (title == null || title.isEmpty || !mounted) break;
+  // ── Quick-add bar ────────────────────────────────────────────────────────
+  // The bar and the FAB row share one bottom slot; only the closed-state
+  // FAB row can open the bar, so there is no toggle — just an open and a
+  // close. Opening from anywhere else (edge-swipe, category switch) is not
+  // a thing, so keeping them separate reads cleaner than a toggle that is
+  // only ever called one way.
+  void _openQuickAdd() => setState(() => _showQuickAdd = true);
 
-      final task = await StorageService.addTask(title, _currentCategoryId);
+  void _closeQuickAdd() {
+    if (_showQuickAdd) setState(() => _showQuickAdd = false);
+  }
 
-      // Flag the new tile for the entry animation; cleared after one
-      // animation duration (fire-and-forget so the fast-entry loop below is
-      // never stalled) — see the invariant on _justAddedTaskIds.
-      setState(() => _justAddedTaskIds.add(task.id));
-      unawaited(
-        Future<void>.delayed(kFastAnimationDuration)
-            .then((_) => _justAddedTaskIds.remove(task.id)),
-      );
-
-      // Deliberate: dialog reopens after each add for fast entry — do not "fix" into single-shot.
-    }
+  /// Quick-add submit path: save immediately, flag the new tile for its
+  /// entry animation, and let the bar clear itself for the next entry.
+  Future<void> _submitQuickAdd(String title) async {
+    final task = await StorageService.addTask(title, _currentCategoryId);
+    if (!mounted) return;
+    setState(() => _justAddedTaskIds.add(task.id));
+    unawaited(
+      Future<void>.delayed(kFastAnimationDuration)
+          .then((_) => _justAddedTaskIds.remove(task.id)),
+    );
   }
 
   Future<void> _deleteTask(Task task, {bool animate = true}) async {
@@ -392,306 +398,526 @@ class _TaskScreenState extends State<TaskScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder(
-      // Rebuild on ANY category change (name/color edits) or task change
-      valueListenable: Hive.box<TaskCategory>(kCategoryBoxName).listenable(),
-      builder: (context, _, child) {
-        final category =
-            StorageService.getCategory(_currentCategoryId) ??
-            StorageService.getCategory(kQuickTasksCategoryId)!;
-        _currentCategoryId = category.id; // self-heal if current was deleted
+    return PopScope(
+      // While the quick-add bar is open, system back closes it instead of
+      // leaving the screen; closed, back behaves as before.
+      canPop: !_showQuickAdd,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _closeQuickAdd();
+      },
+      child: ValueListenableBuilder(
+        // Rebuild on ANY category change (name/color edits) or task change
+        valueListenable: Hive.box<TaskCategory>(kCategoryBoxName).listenable(),
+        builder: (context, _, child) {
+          final category =
+              StorageService.getCategory(_currentCategoryId) ??
+              StorageService.getCategory(kQuickTasksCategoryId)!;
+          _currentCategoryId = category.id; // self-heal if current was deleted
 
-        return Theme(
-          data: _categoryTheme(context),
-          child: Stack(
-            children: [
-              Scaffold(
-                appBar: AppBar(
-                  // Every palette entry is a Material 800-level shade, so a
-                  // white foreground is safe for all of them.
-                  backgroundColor: Color(category.colorValue),
-                  foregroundColor: Colors.white,
-                  title: Text(category.name),
-                  actions: [
-                    PopupMenuButton<String>(
-                      onSelected: (value) {
-                        if (value == 'clear_completed') {
-                          _clearCompleted();
-                        } else if (value == 'delete_all') {
-                          _deleteAll();
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        const PopupMenuItem(
-                          value: 'clear_completed',
-                          child: Text('Clear Completed'),
-                        ),
-                        const PopupMenuItem(
-                          value: 'delete_all',
-                          child: Text(
-                            'Delete All Tasks',
-                            style: TextStyle(color: Colors.red),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                body: Column(
-                  children: [
-                    // Time-of-day greeting; fades out and folds its space
-                    // away after kGreetingVisibleDuration. AnimatedOpacity
-                    // gives the fade-in; AnimatedSize collapses the vacated
-                    // slot so the task list slides up instead of jumping.
-                    AnimatedSize(
-                      duration: kAnimationDuration,
-                      alignment: Alignment.topCenter,
-                      child: AnimatedOpacity(
-                        duration: kAnimationDuration,
-                        opacity: _showGreeting ? 1 : 0,
-                        child: !_showGreeting
-                            ? const SizedBox.shrink()
-                            : Container(
-                                margin: const EdgeInsets.fromLTRB(
-                                  16,
-                                  12,
-                                  16,
-                                  0,
-                                ),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 12,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Color(category.colorValue)
-                                      .withAlpha(30),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Text(
-                                  _greetingText,
-                                  style: Theme.of(context).textTheme.titleLarge
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.w600,
-                                        color: Color(category.colorValue),
-                                      ),
-                                ),
-                              ),
-                      ),
-                    ),
-                    Expanded(
-                      child: ValueListenableBuilder(
-                        valueListenable: Hive.box<Task>(kTaskBoxName)
-                            .listenable(),
-                        builder: (context, _, child) {
-                          final split = StorageService.getTasksSplit(
-                            _currentCategoryId,
-                          );
-                          final active = split.active;
-                          final completed = split.completed;
-
-                          if (active.isEmpty && completed.isEmpty) {
-                            return Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    kEmptyStateTitle,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleLarge,
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    kEmptyStateSubtitle,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium,
-                                  ),
-                                ],
-                              ),
-                            );
+          return Theme(
+            data: _categoryTheme(context),
+            child: Stack(
+              children: [
+                Scaffold(
+                  appBar: AppBar(
+                    // Every palette entry is a Material 800-level shade, so a
+                    // white foreground is safe for all of them.
+                    backgroundColor: Color(category.colorValue),
+                    foregroundColor: Colors.white,
+                    title: Text(category.name),
+                    actions: [
+                      PopupMenuButton<String>(
+                        onSelected: (value) {
+                          if (value == 'clear_completed') {
+                            _clearCompleted();
+                          } else if (value == 'delete_all') {
+                            _deleteAll();
                           }
+                        },
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: 'clear_completed',
+                            child: Text('Clear Completed'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'delete_all',
+                            child: Text(
+                              'Delete All Tasks',
+                              style: TextStyle(color: Colors.red),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  body: Column(
+                    children: [
+                      // Time-of-day greeting; fades out and folds its space
+                      // away after kGreetingVisibleDuration. AnimatedOpacity
+                      // gives the fade-in; AnimatedSize collapses the vacated
+                      // slot so the task list slides up instead of jumping.
+                      AnimatedSize(
+                        duration: kAnimationDuration,
+                        alignment: Alignment.topCenter,
+                        child: AnimatedOpacity(
+                          duration: kAnimationDuration,
+                          opacity: _showGreeting ? 1 : 0,
+                          child: !_showGreeting
+                              ? const SizedBox.shrink()
+                              : Container(
+                                  margin: const EdgeInsets.fromLTRB(
+                                    16,
+                                    12,
+                                    16,
+                                    0,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 12,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Color(category.colorValue)
+                                        .withAlpha(30),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    _greetingText,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                          color: Color(category.colorValue),
+                                        ),
+                                  ),
+                                ),
+                        ),
+                      ),
+                      Expanded(
+                        child: ValueListenableBuilder(
+                          valueListenable: Hive.box<Task>(kTaskBoxName)
+                              .listenable(),
+                          builder: (context, _, child) {
+                            final split = StorageService.getTasksSplit(
+                              _currentCategoryId,
+                            );
+                            final active = split.active;
+                            final completed = split.completed;
 
-                          // Active tasks first, completed below. Only active are reorderable.
-                          return ReorderableListView.builder(
-                            padding: const EdgeInsets.only(
-                              bottom: 80,
-                            ), // Fab space
-                            itemCount:
-                                active.length +
-                                (completed.isNotEmpty
-                                    ? completed.length + 1
-                                    : 0),
-                            onReorder: (oldIndex, newIndex) async {
-                              // Only allow reordering within the active section
-                              if (oldIndex >= active.length ||
-                                  newIndex > active.length) {
-                                return;
-                              }
-                              if (oldIndex < newIndex) newIndex -= 1;
-                              final item = active.removeAt(oldIndex);
-                              active.insert(newIndex, item);
-                              await StorageService.reorderActiveTasks(
-                                _currentCategoryId,
-                                active,
+                            if (active.isEmpty && completed.isEmpty) {
+                              return Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text(
+                                      kEmptyStateTitle,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleLarge,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      kEmptyStateSubtitle,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium,
+                                    ),
+                                  ],
+                                ),
                               );
-                            },
-                            itemBuilder: (context, index) {
-                              if (index < active.length) {
-                                final task = active[index];
+                            }
+
+                            // Active tasks first, completed below. Only active are reorderable.
+                            return ReorderableListView.builder(
+                              padding: const EdgeInsets.only(
+                                bottom: 80,
+                              ), // Fab space
+                              itemCount:
+                                  active.length +
+                                  (completed.isNotEmpty
+                                      ? completed.length + 1
+                                      : 0),
+                              onReorder: (oldIndex, newIndex) async {
+                                // Only allow reordering within the active section
+                                if (oldIndex >= active.length ||
+                                    newIndex > active.length) {
+                                  return;
+                                }
+                                if (oldIndex < newIndex) newIndex -= 1;
+                                final item = active.removeAt(oldIndex);
+                                active.insert(newIndex, item);
+                                await StorageService.reorderActiveTasks(
+                                  _currentCategoryId,
+                                  active,
+                                );
+                              },
+                              itemBuilder: (context, index) {
+                                if (index < active.length) {
+                                  final task = active[index];
+                                  return _AnimatedTaskTile(
+                                    key: ValueKey(task.id),
+                                    removing: _removingTaskIds.contains(
+                                      task.id,
+                                    ),
+                                    animateIn: _justAddedTaskIds.contains(
+                                      task.id,
+                                    ),
+                                    child: TaskTile(
+                                      task: task,
+                                      onCheckboxChanged: (_) => _onToggle(task),
+                                      onEditTap: (newTitle) async {
+                                        task.title = newTitle;
+                                        await StorageService.updateTask(task);
+                                      },
+                                      onDeleteTap: () => _deleteTask(task),
+                                      onDismissed: () =>
+                                          _deleteTask(task, animate: false),
+                                    ),
+                                  );
+                                }
+
+                                // Completed section header
+                                if (index == active.length) {
+                                  return Padding(
+                                    key: const ValueKey('completed_header'),
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      24,
+                                      16,
+                                      8,
+                                    ),
+                                    child: Text(
+                                      kCompletedHeaderText,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall,
+                                    ),
+                                  );
+                                }
+
+                                // Completed tasks (not draggable, muted)
+                                final task =
+                                    completed[index - active.length - 1];
                                 return _AnimatedTaskTile(
                                   key: ValueKey(task.id),
                                   removing: _removingTaskIds.contains(task.id),
                                   animateIn: _justAddedTaskIds.contains(
                                     task.id,
                                   ),
-                                  child: TaskTile(
-                                    task: task,
-                                    onCheckboxChanged: (_) => _onToggle(task),
-                                    onEditTap: (newTitle) async {
-                                      task.title = newTitle;
-                                      await StorageService.updateTask(task);
-                                    },
-                                    onDeleteTap: () => _deleteTask(task),
-                                    onDismissed: () =>
-                                        _deleteTask(task, animate: false),
+                                  child: Opacity(
+                                    opacity: kCompletedOpacity,
+                                    child: TaskTile(
+                                      task: task,
+                                      onCheckboxChanged: (_) => _onToggle(task),
+                                      onEditTap: (newTitle) async {
+                                        task.title = newTitle;
+                                        await StorageService.updateTask(task);
+                                      },
+                                      onDeleteTap: () => _deleteTask(task),
+                                      onDismissed: () =>
+                                          _deleteTask(task, animate: false),
+                                    ),
                                   ),
                                 );
-                              }
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
-                              // Completed section header
-                              if (index == active.length) {
-                                return Padding(
-                                  key: const ValueKey('completed_header'),
-                                  padding: const EdgeInsets.fromLTRB(
-                                    16,
-                                    24,
-                                    16,
-                                    8,
-                                  ),
-                                  child: Text(
-                                    kCompletedHeaderText,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleSmall,
-                                  ),
-                                );
-                              }
+                // Full-screen dismiss layer: any tap outside the bar closes
+                // it. Opaque so the list underneath can't half-handle the
+                // tap; sits UNDER the bottom overlay so the bar itself stays
+                // interactive. Only mounted while the bar is open — while
+                // closed there is no bar to dismiss, and swallowing taps on
+                // the FABs would be wrong.
+                if (_showQuickAdd)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _closeQuickAdd,
+                      child: const ColoredBox(color: Colors.transparent),
+                    ),
+                  ),
 
-                              // Completed tasks (not draggable, muted)
-                              final task = completed[index - active.length - 1];
-                              return _AnimatedTaskTile(
-                                key: ValueKey(task.id),
-                                removing: _removingTaskIds.contains(task.id),
-                                animateIn: _justAddedTaskIds.contains(task.id),
-                                child: Opacity(
-                                  opacity: kCompletedOpacity,
-                                  child: TaskTile(
-                                    task: task,
-                                    onCheckboxChanged: (_) => _onToggle(task),
-                                    onEditTap: (newTitle) async {
-                                      task.title = newTitle;
-                                      await StorageService.updateTask(task);
-                                    },
-                                    onDeleteTap: () => _deleteTask(task),
-                                    onDismissed: () =>
-                                        _deleteTask(task, animate: false),
+                // Quick-add bar and FABs share ONE bottom slot: opening the
+                // bar swaps the buttons out — they slide down, the bar slides
+                // up into their width — instead of stacking above them.
+                // viewInsets padding lifts the slot over the keyboard, same
+                // pattern as _TaskEditSheet.
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      bottom: MediaQuery.viewInsetsOf(context).bottom,
+                    ),
+                    child: SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: AnimatedSwitcher(
+                          duration: kAnimationDuration,
+                          // Incoming slides up into the slot; the outgoing
+                          // child plays the same transition reversed (slides
+                          // down out). Fade hides the cross-over.
+                          transitionBuilder: (child, animation) =>
+                              SlideTransition(
+                                position: animation.drive(
+                                  Tween(
+                                    begin: const Offset(0, 1),
+                                    end: Offset.zero,
+                                  ).chain(
+                                    CurveTween(curve: Curves.easeOutCubic),
                                   ),
                                 ),
-                              );
-                            },
-                          );
-                        },
+                                child: FadeTransition(
+                                  opacity: animation,
+                                  child: child,
+                                ),
+                              ),
+                          child: _showQuickAdd
+                              ? ConstrainedBox(
+                                  key: const ValueKey('quickAdd'),
+                                  // Min height matches the FAB row so the
+                                  // swap never snaps the slot size; the box
+                                  // grows when the user types a multi-line
+                                  // entry (maxLines: 4 in _QuickAddBar).
+                                  constraints: const BoxConstraints(
+                                    minHeight: 56,
+                                  ),
+                                  child: _QuickAddBar(
+                                    color: Color(category.colorValue),
+                                    onSubmit: _submitQuickAdd,
+                                    onClose: _closeQuickAdd,
+                                  ),
+                                )
+                              : Row(
+                                  key: const ValueKey('fabs'),
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    FloatingActionButton(
+                                      onPressed: _openCategories,
+                                      tooltip: 'Categories',
+                                      backgroundColor: Color(
+                                        category.colorValue,
+                                      ),
+                                      foregroundColor: Colors.white,
+                                      child: const Icon(Icons.home),
+                                    ),
+                                    FloatingActionButton(
+                                      onPressed: _openQuickAdd,
+                                      tooltip: 'Add Task',
+                                      backgroundColor: Color(
+                                        category.colorValue,
+                                      ),
+                                      foregroundColor: Colors.white,
+                                      child: const Icon(Icons.add),
+                                    ),
+                                  ],
+                                ),
+                        ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
-                // Custom bottom bar instead of standard FAB placement.
-                bottomNavigationBar: SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        FloatingActionButton(
-                          onPressed: _openCategories,
-                          tooltip: 'Categories',
-                          backgroundColor: Color(category.colorValue),
-                          foregroundColor: Colors.white,
-                          child: const Icon(Icons.home),
-                        ),
-                        FloatingActionButton(
-                          onPressed: _addTask,
-                          tooltip: 'Add Task',
-                          backgroundColor: Color(category.colorValue),
-                          foregroundColor: Colors.white,
-                          child: const Icon(Icons.add),
-                        ),
-                      ],
+
+                // Left-edge drag to open Categories. Sits above the Scaffold in the Stack
+                // so it wins hit-testing within its 16px strip, but translucent so taps on
+                // that strip still reach the tile underneath (only horizontal drags are claimed).
+                //
+                // TRADE-OFF: This competes with the TaskTile Dismissible's horizontal drag
+                // recognizer for gestures starting within the strip. The topmost widget wins
+                // the gesture arena. If edge swipes interfere with dismissing, shrink
+                // kEdgeSwipeWidth or use a Drawer.
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: kEdgeSwipeWidth,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragStart: (_) => _edgeDragDx = 0,
+                    onHorizontalDragUpdate: (details) {
+                      _edgeDragDx += details.primaryDelta ?? 0;
+                    },
+                    onHorizontalDragCancel: () => _edgeDragDx = 0,
+                    onHorizontalDragEnd: (_) {
+                      final shouldOpen = _edgeDragDx >= kEdgeSwipeDistance;
+                      _edgeDragDx = 0;
+                      if (shouldOpen) _openCategories();
+                    },
+                    child: const ColoredBox(color: Colors.transparent),
+                  ),
+                ),
+
+                // Celebration rain over everything, app bar included. Colors
+                // are the existing category palette — no new list.
+                //
+                // IgnorePointer is load-bearing, not cosmetic: ConfettiWidget
+                // renders a CustomPaint whose painter does not override
+                // hitTest, so the framework falls back to "point is within
+                // bounds" — meaning the full-area confetti layer captures
+                // every tap in its slot for the duration of the burst. Without
+                // this wrapper, tapping a task tile while confetti falls
+                // registers the tap on the confetti layer instead of the tile,
+                // and the user sees a 1s window where taps on the covered region do nothing.
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: IgnorePointer(
+                    child: ConfettiWidget(
+                      confettiController: _confettiController,
+                      blastDirection: pi / 2, // down
+                      numberOfParticles: kConfettiParticles,
+                      emissionFrequency: 0.05,
+                      maxBlastForce: 40,
+                      minBlastForce: 15,
+                      gravity: 0.3,
+                      colors: kCategoryPalette,
                     ),
                   ),
                 ),
-              ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
 
-              // Left-edge drag to open Categories. Sits above the Scaffold in the Stack
-              // so it wins hit-testing within its 16px strip, but translucent so taps on
-              // that strip still reach the tile underneath (only horizontal drags are claimed).
-              //
-              // TRADE-OFF: This competes with the TaskTile Dismissible's horizontal drag
-              // recognizer for gestures starting within the strip. The topmost widget wins
-              // the gesture arena. If edge swipes interfere with dismissing, shrink
-              // kEdgeSwipeWidth or use a Drawer.
-              Positioned(
-                left: 0,
-                top: 0,
-                bottom: 0,
-                width: kEdgeSwipeWidth,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onHorizontalDragStart: (_) => _edgeDragDx = 0,
-                  onHorizontalDragUpdate: (details) {
-                    _edgeDragDx += details.primaryDelta ?? 0;
-                  },
-                  onHorizontalDragCancel: () => _edgeDragDx = 0,
-                  onHorizontalDragEnd: (_) {
-                    final shouldOpen = _edgeDragDx >= kEdgeSwipeDistance;
-                    _edgeDragDx = 0;
-                    if (shouldOpen) _openCategories();
-                  },
-                  child: const ColoredBox(color: Colors.transparent),
-                ),
-              ),
+/// Stadium-shaped rapid-add bar. Mounted only while open (the AnimatedSwitcher
+/// in TaskScreen swaps it in for the FAB row), so its controller and focus
+/// start fresh on every open and dispose on close — nothing to clear or
+/// blur by hand.
+class _QuickAddBar extends StatefulWidget {
+  /// Current category color, passed as the raw value because it drives the
+  /// visuals directly (tint, focus ring, cursor, submit button) — same
+  /// convention as the greeting banner.
+  final Color color;
+  final ValueChanged<String> onSubmit;
 
-              // Celebration rain over everything, app bar included. Colors
-              // are the existing category palette — no new list.
-              //
-              // IgnorePointer is load-bearing, not cosmetic: ConfettiWidget
-              // renders a CustomPaint whose painter does not override
-              // hitTest, so the framework falls back to "point is within
-              // bounds" — meaning the full-area confetti layer captures
-              // every tap in its slot for the duration of the burst. Without
-              // this wrapper, tapping a task tile while confetti falls
-              // registers the tap on the confetti layer instead of the tile,
-              // and the user sees a 1s window where taps on the covered region do nothing.
-              Align(
-                alignment: Alignment.topCenter,
-                child: IgnorePointer(
-                  child: ConfettiWidget(
-                    confettiController: _confettiController,
-                    blastDirection: pi / 2, // down
-                    numberOfParticles: kConfettiParticles,
-                    emissionFrequency: 0.05,
-                    maxBlastForce: 40,
-                    minBlastForce: 15,
-                    gravity: 0.3,
-                    colors: kCategoryPalette,
-                  ),
-                ),
-              ),
-            ],
+  /// Invoked by the leading ✕. While the bar is open the FAB row is gone,
+  /// so the bar must carry its own visible way out — back and tap-outside
+  /// alone are not discoverable.
+  final VoidCallback onClose;
+
+  const _QuickAddBar({
+    required this.color,
+    required this.onSubmit,
+    required this.onClose,
+  });
+
+  @override
+  State<_QuickAddBar> createState() => _QuickAddBarState();
+}
+
+class _QuickAddBarState extends State<_QuickAddBar> {
+  final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+  bool _canSave = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(() {
+      final canSave = _controller.text.trim().isNotEmpty;
+      if (canSave != _canSave) setState(() => _canSave = canSave);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  /// Saves, clears, and keeps focus — rapid entry means the keyboard and
+  /// the caret never move between submits.
+  void _submit() {
+    final title = _controller.text.trim();
+    if (title.isEmpty) return;
+    widget.onSubmit(title);
+    _controller.clear();
+    // The keyboard's "done" action drops focus on some platforms; take it
+    // back so the next entry can start typing immediately.
+    _focusNode.requestFocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stadium = BorderRadius.circular(999); // clamps to a capsule
+
+    // Opaque fill: the bar overlays the task list, so the old translucent
+    // tint (alpha 30) let rows underneath bleed through the text field and
+    // made typed text unreadable. Blending the same tint over the surface
+    // color keeps the capsule's look but seals it.
+    final fillColor = Color.alphaBlend(
+      widget.color.withAlpha(60),
+      Theme.of(context).colorScheme.surface,
+    );
+
+    // The bar lives in the Stack overlay OUTSIDE the Scaffold (that is what
+    // lets the dismiss scrim cover the whole screen), so nothing above it
+    // provides a Material — TextField requires one. Transparent wrapper:
+    // the capsule decoration below paints the visible surface.
+    return Material(
+      type: MaterialType.transparency,
+      child: TextField(
+        controller: _controller,
+        focusNode: _focusNode,
+        autofocus: true, // opens with the keyboard already up
+        minLines: 1,
+        // Grows with pasted lists; cap keeps the bar from swallowing the
+        // screen. maxLines > 1 also flips Enter from "submit" to "newline"
+        // on every platform (including web), which is what lets a pasted
+        // multi-line list survive.
+        maxLines: 4,
+        textInputAction: TextInputAction.newline,
+        cursorColor: widget.color,
+        // NOTE: onSubmitted deliberately removed. Enter now inserts a
+        // newline; the trailing arrow button is the submit affordance,
+        // exactly as before.
+        decoration: InputDecoration(
+          hintText: kQuickAddHint,
+          filled: true,
+          fillColor: fillColor,
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical: 14,
           ),
-        );
-      },
+          border: OutlineInputBorder(
+            borderRadius: stadium,
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: stadium,
+            borderSide: BorderSide(color: widget.color, width: 2),
+          ),
+          prefixIcon: IconButton(
+            icon: Icon(Icons.close, color: widget.color),
+            tooltip: 'Close',
+            onPressed: widget.onClose,
+          ),
+          suffixIcon: Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: IconButton(
+              onPressed: _canSave ? _submit : null,
+              tooltip: 'Add task',
+              style: IconButton.styleFrom(
+                backgroundColor: widget.color,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: widget.color.withAlpha(60),
+              ),
+              icon: const Icon(Icons.arrow_upward),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

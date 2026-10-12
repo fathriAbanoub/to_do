@@ -78,6 +78,16 @@ const kEmptyStateSubtitle = 'Tap + to add your first task';
 /// row opens a bottom sheet with the full title.
 const kTaskTitleMaxLines = 2;
 
+/// Max visible lines for a task title that contains newlines (a pasted
+/// multi-line list). Single-line titles keep [kTaskTitleMaxLines] so normal
+/// tasks stay compact; multi-line lists expand so the user can read them
+/// without opening the edit sheet.
+const kTaskTitleMultilineMaxLines = 8;
+
+// ── Quick-add bar ─────────────────────────────────────────────────────────
+/// Placeholder shown in the persistent quick-add bar's TextField.
+const kQuickAddHint = 'Add a task';
+
 // ── Supabase sync ───────────────────────────────────────────────────────────
 // Read from --dart-define or --dart-define-from-file=secrets.json at compile time.
 // Empty strings gracefully disable sync (local-only mode).
