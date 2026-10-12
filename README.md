@@ -10,7 +10,8 @@ _A minimal, polished, local-first Flutter todo app — with end-to-end encrypted
 [![Dart](https://img.shields.io/badge/Dart-3.13%2B-0175C2?style=flat-square&logo=dart&logoColor=white)](https://dart.dev)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Web%20%7C%20Windows-2E7D32?style=flat-square)](https://flutter.dev/multi-platform)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-⭐ If you like this project, star it on GitHub!
+
+If you like this project, star it ⭐!
 
 [Features](#features) • [Getting started](#getting-started) • [Usage](#usage) • [Encrypted sync](#encrypted-sync-optional) • [Security](#security--credentials) • [How it works](#how-it-works) • [Examples](#examples) • [Troubleshooting](#troubleshooting)
 
@@ -28,7 +29,8 @@ _A minimal, polished, local-first Flutter todo app — with end-to-end encrypted
 - **Optional Supabase sync** — debounced push, watermark-based pull, and tombstoned deletes against a single `items` table
 - **Recovery key** — a one-time 64-hex key restores your data on a new device, verified against the server before it is saved
 - **Color-coded categories** — reorderable, with a custom HSV color picker and a protected Quick Tasks list
-- **Gesture-driven** — swipe to complete or delete, drag to reorder, edge-swipe navigation, and an add dialog that stays open for rapid entry
+- **Gesture-driven** — swipe to complete or delete, drag to reorder, edge-swipe navigation, and a persistent quick-add bar for rapid entry
+- **Multi-line tasks** — the quick-add bar accepts newlines and pasted lists; long titles expand in the list (up to 8 lines) instead of always truncating to 2
 - **Undo-friendly** — deleted tasks and whole categories can be restored from the snackbar, positions included
 - **Polished details** — time-of-day greetings, confetti when you clear a list, and a satisfying check sound
 - **Six platforms** — Android, iOS, Linux, macOS, web, and Windows from a single codebase
@@ -68,22 +70,46 @@ On first launch the app creates the default Quick Tasks category and — in loca
 
 The three things worth knowing:
 
-1. Tap **+** to add a task — the dialog reopens after each add for rapid entry; close it with CANCEL
+1. Tap **+** to open the quick-add bar — the field keeps focus after each add for rapid entry, and accepts multi-line text (Enter inserts a newline; the ↑ button submits)
 2. Swipe a row **right** to complete it or **left** to delete it, and drag rows to reorder
 3. Open categories with the home button or a swipe from the **left screen edge**
 
-| Action                | How                                                             |
-| --------------------- | --------------------------------------------------------------- |
-| Add a task            | **+** button — the dialog stays open for back-to-back entry     |
-| Complete / uncomplete | Tap the checkbox, or swipe the row right                        |
-| Delete                | Swipe the row left, trash icon, or menu → Delete All Tasks      |
-| Edit a title          | Tap the row — the bottom sheet saves from the check button      |
-| Reorder               | Long-press and drag active tasks                                |
-| Switch category       | Home button, or drag from the left edge                         |
-| Back from categories  | Drag from the right edge                                        |
-| Undo a delete         | **UNDO** on the snackbar — works for tasks and whole categories |
+| Action                | How                                                                 |
+| --------------------- | ------------------------------------------------------------------- |
+| Add a task            | **+** button — the quick-add bar keeps focus for back-to-back entry |
+| Complete / uncomplete | Tap the checkbox, or swipe the row right                            |
+| Delete                | Swipe the row left, trash icon, or menu → Delete All Tasks          |
+| Edit a title          | Tap the row — the bottom sheet saves from the check button          |
+| Reorder               | Long-press and drag active tasks                                    |
+| Switch category       | Home button, or drag from the left edge                             |
+| Back from categories  | Drag from the right edge                                            |
+| Undo a delete         | **UNDO** on the snackbar — works for tasks and whole categories     |
 
 Deleting a category asks what to do with its tasks (move them to Quick Tasks, or delete them) and stays undoable either way. Completed tasks drop below a _Completed_ header and are muted; clearing the last active task in a category earns a little confetti. On launch the app greets you — it asks for your name once, and skipping is fine.
+
+### The quick-add bar
+
+Tapping **+** opens a capsule-shaped field in place of the FAB row — the two buttons slide down and the bar slides up into their slot, so the layout around it never jumps.
+
+The capsule is tinted in the current category's color and reads as a solid surface:
+
+- **Opaque fill** — the tint is blended over the surface color instead of laid down as a translucent overlay, so task rows underneath cannot bleed through while you type
+- **Focus ring** — a 2 px category-colored border appears while the field has focus
+- **Leading ✕** — closes the bar; system back and tapping outside also work
+- **Trailing ↑** — submits the task; stays disabled until the field contains non-whitespace text
+
+**Rapid entry.** After each submit the field clears and keeps focus, so the keyboard never drops between items.
+
+**Multi-line input.** The field starts at one line, grows as you type, and caps at four lines before scrolling internally. **Enter inserts a newline** rather than submitting, so a pasted list works directly:
+
+```
+Groceries
+- milk
+- eggs
+- bread
+```
+
+Newlines and `- ` markers are plain characters — they are stored, sealed, and synced exactly as typed; nothing transforms them into styled bullets. A title containing a newline expands to up to **8 visible lines** (`kTaskTitleMultilineMaxLines`) in the list instead of the usual 2 (`kTaskTitleMaxLines`). Both caps ellipsize; tapping the tile opens the full text in the edit sheet, which has no upper limit and remains the source of truth.
 
 ## Encrypted sync (optional)
 
@@ -222,6 +248,7 @@ flutter build ios --release --dart-define-from-file=secrets.json       # needs m
 
 - Time-of-day greetings: the `kGreeting*` variant lists in `lib/constants.dart`
 - Category color palette: `kCategoryPalette` in `lib/constants.dart`
+- Multi-line title expansion in the list: `kTaskTitleMultilineMaxLines` in `lib/constants.dart`
 - Check sound: replace `assets/sounds/check.mp3`
 
 ## Troubleshooting
